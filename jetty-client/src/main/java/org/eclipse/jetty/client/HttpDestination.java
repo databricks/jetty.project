@@ -608,14 +608,12 @@ public class HttpDestination implements Dumpable
         }
     }
 
-    protected void send(AbstractHttpConnection connection, HttpExchange exchange) throws IOException
-    {
-        synchronized (this)
-        {
-            // If server closes the connection, put the exchange back
-            // to the exchange queue and recycle the connection
-            if (!connection.send(exchange))
-            {
+    protected void send(AbstractHttpConnection connection, HttpExchange exchange) throws IOException {
+        synchronized (this) {
+            if (!connection.send(exchange)) {
+
+                // If server closes the connection, put the exchange back
+                // to the exchange queue and recycle the connection
                 if (exchange.getStatus() <= HttpExchange.STATUS_WAITING_FOR_CONNECTION)
                     _exchanges.add(0, exchange);
                 returnIdleConnection(connection);

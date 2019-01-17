@@ -431,19 +431,20 @@ public abstract class AbstractHttpConnection extends AbstractConnection implemen
 
     protected void exchangeExpired(HttpExchange exchange)
     {
-        synchronized (this)
-        {
-            // We are expiring an exchange, but the exchange is pending
-            // Cannot reuse the connection because the reply may arrive, so close it
-            if (_exchange == exchange)
-            {
-                try
-                {
-                    _destination.returnConnection(this, true);
-                }
-                catch (IOException x)
-                {
-                    LOG.ignore(x);
+        // must lock destination prior to locking *this* to prevent deadlock because:
+        //   1. _destination.returnConnection is synchronized
+        //   2. destination.send is synchronized and calls *this*.send which is synchronized
+        // Destination lock and connection lock must always be locked in the same order
+        synchronized (_destination) {
+            synchronized (this) {
+                // We are expiring an exchange, but the exchange is pending
+                // Cannot reuse the connection because the reply may arrive, so close it
+                if (_exchange == exchange) {
+                    try {
+                        _destination.returnConnection(this, true);
+                    } catch (IOException x) {
+                        LOG.ignore(x);
+                    }
                 }
             }
         }

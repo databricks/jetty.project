@@ -204,48 +204,48 @@ public class AsyncHttpConnection extends AbstractHttpConnection implements Async
                         if (persistent)
                             _endp.setMaxIdleTime((int)_destination.getHttpClient().getIdleTimeout());
 
-                        synchronized (this)
-                        {
-                            exchange=_exchange;
-                            _exchange = null;
+                        // must lock destination prior to locking *this* to prevent deadlock because:
+                        //   1. _destination.returnConnection is synchronized
+                        //   2. destination.send is synchronized and calls *this*.send which is synchronized
+                        // Destination lock and connection lock must always be locked in the same order
+                        synchronized (_destination) {
+                            synchronized (this) {
+                                exchange = _exchange;
+                                _exchange = null;
 
-                            // Cancel the exchange
-                            if (exchange!=null)
-                            {
-                                exchange.cancelTimeout(_destination.getHttpClient());
+                                // Cancel the exchange
+                                if (exchange != null) {
+                                    exchange.cancelTimeout(_destination.getHttpClient());
 
-                                // TODO should we check the exchange is done?
-                            }
-
-                            // handle switched protocols
-                            if (_status==HttpStatus.SWITCHING_PROTOCOLS_101)
-                            {
-                                Connection switched=exchange.onSwitchProtocol(_endp);
-                                if (switched!=null)
-                                {
-                                    // switched protocol!
-                                    if (_pipeline!=null)
-                                    {
-                                        _destination.send(_pipeline);
-                                    }
-                                    _pipeline = null;
-
-                                    connection=switched;
+                                    // TODO should we check the exchange is done?
                                 }
-                            }
 
-                            // handle pipelined requests
-                            if (_pipeline!=null)
-                            {
-                                if (!persistent || connection!=this)
-                                    _destination.send(_pipeline);
-                                else
-                                    _exchange=_pipeline;
-                                _pipeline=null;
-                            }
+                                // handle switched protocols
+                                if (_status == HttpStatus.SWITCHING_PROTOCOLS_101) {
+                                    Connection switched = exchange.onSwitchProtocol(_endp);
+                                    if (switched != null) {
+                                        // switched protocol!
+                                        if (_pipeline != null) {
+                                            _destination.send(_pipeline);
+                                        }
+                                        _pipeline = null;
 
-                            if (_exchange==null && !isReserved())  // TODO how do we return switched connections?
-                                _destination.returnConnection(this, !persistent);
+                                        connection = switched;
+                                    }
+                                }
+
+                                // handle pipelined requests
+                                if (_pipeline != null) {
+                                    if (!persistent || connection != this)
+                                        _destination.send(_pipeline);
+                                    else
+                                        _exchange = _pipeline;
+                                    _pipeline = null;
+                                }
+
+                                if (_exchange == null && !isReserved())  // TODO how do we return switched connections?
+                                    _destination.returnConnection(this, !persistent);
+                            }
                         }
 
                     }

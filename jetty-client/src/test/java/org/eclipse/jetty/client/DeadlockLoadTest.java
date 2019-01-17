@@ -333,7 +333,7 @@ public class DeadlockLoadTest extends AbstractConnectionTest
                     @Override
                     public void run() {
                         try {
-                            send(httpClient, serverPort, 1 << 18);
+                            send(httpClient, serverPort, 1 << 15);
                         } catch (Exception e) {
                             e.printStackTrace();
                         }

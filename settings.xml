@@ -3,12 +3,12 @@
   <interactiveMode>true</interactiveMode>
   <offline>false</offline>
 <proxies>
-   <!--proxy>
+   <proxy>
       <active>true</active>
       <protocol>http</protocol>
       <host>proxy.eclipse.org</host>
       <port>9898</port>
-    </proxy-->
+    </proxy>
   </proxies>
 <mirrors>
   <mirror>

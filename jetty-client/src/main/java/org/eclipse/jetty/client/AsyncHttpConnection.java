@@ -204,7 +204,6 @@ public class AsyncHttpConnection extends AbstractHttpConnection implements Async
                         if (persistent)
                             _endp.setMaxIdleTime((int)_destination.getHttpClient().getIdleTimeout());
 
-
                         // must lock destination prior to locking *this* to prevent deadlock because:
                         //   1. _destination.returnConnection is synchronized
                         //   2. destination.send is synchronized and calls *this*.send which is synchronized
@@ -248,6 +247,7 @@ public class AsyncHttpConnection extends AbstractHttpConnection implements Async
                                     _destination.returnConnection(this, !persistent);
                             }
                         }
+
                     }
                 }
             }

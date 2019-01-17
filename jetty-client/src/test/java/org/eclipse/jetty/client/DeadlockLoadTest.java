@@ -19,25 +19,22 @@
 package org.eclipse.jetty.client;
 
 import static org.junit.Assert.assertEquals;
-import static sun.misc.PostVMInitHook.run;
 
 import java.io.*;
 import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Random;
+import java.nio.channels.SocketChannel;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jetty.io.Buffer;
 import org.eclipse.jetty.io.ByteArrayBuffer;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.junit.Test;
 
 public class DeadlockLoadTest extends AbstractConnectionTest
@@ -49,172 +46,146 @@ public class DeadlockLoadTest extends AbstractConnectionTest
         return httpClient;
     }
 
-    private class MyServer {
+    private class EchoRESTServer {
         ServerSocket _socket;
         Thread _thread;
         final AtomicBoolean _started = new AtomicBoolean();
         final AtomicBoolean _stopped = new AtomicBoolean();
+        Selector selector;
+        ServerSocketChannel sock;
+        SelectionKey _key;
+        double _errorRate;
+        int _connectionsCreated;
 
+        public EchoRESTServer(double errorRate) {
+            _errorRate = errorRate;
+        }
+        public EchoRESTServer(){this(.1);}
 
         public int start() throws IOException {
             if(!_started.getAndSet(true)){
-                _socket = new ServerSocket();
-                _socket.setSoTimeout(1000);
-                _socket.bind(null);
+                selector = Selector.open();
+                sock = ServerSocketChannel.open();
+                sock.bind(null);
+                sock.configureBlocking(false);
+                // Adjusts this channel's blocking mode.
+                String addr = sock.getLocalAddress().toString();
+                int port = Integer.valueOf(addr.substring(addr.lastIndexOf(":") + 1));
+                _key = sock.register(selector, sock.validOps());
                 _thread = new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        MyServer.this._run();
+                        EchoRESTServer.this._run();
                     }
                 });
                 _thread.start();
-                return _socket.getLocalPort();
+                return port;
             } else {
                 throw new RuntimeException("already started.");
             }
         }
 
+        private String readInput( SocketChannel chan, ByteBuffer inputBuffer, int maxAttempts) throws IOException {
+            for(int i  = 0; i < maxAttempts; ++i) {
+                if (chan.read(inputBuffer) > 0)
+                    return new String(Arrays.copyOf(inputBuffer.array(), inputBuffer.position()));
+            }
+            throw new RuntimeException("weird, no input");
+        }
+
         private void _run() {
-            try {
-                final ThreadPoolExecutor threadPool = new ThreadPoolExecutor(
-                        64,
-                        64,
-                        10,
-                        TimeUnit.SECONDS,
-                        new LinkedBlockingQueue<Runnable>());
-                // Selector: multiplexor of SelectableChannel objects
-                final Selector selector = Selector.open(); // selector is open here
-
-                // ServerSocketChannel: selectable channel for stream-oriented listening sockets
-                final ServerSocketChannel sock = ServerSocketChannel.open();
-                // Binds the channel's socket to a local address and configures the socket to listen for connections
-                sock.bind(null);
-
-                // Adjusts this channel's blocking mode.
-                sock.configureBlocking(true);
-                final SelectionKey k = sock.register(selector, sock.validOps());
-                while(!_stopped.get()) {
-                    try {
-                        final Socket remote = _socket.accept();
-                        try {
-
-
-
-
-                            threadPool.execute(new Runnable() {
-                                @Override
-                                public void run() {
-                                    try {
-                                        selector.select(1000);
-                                        BufferedReader input = new BufferedReader(new InputStreamReader(remote.getInputStream()));
-                                        OutputStream output = remote.getOutputStream();
-                                        remote.setSoTimeout(1000);
-                                        Random rnd = new Random(System.currentTimeMillis());
-                                        while (true || rnd.nextDouble() < .9) {
-                                            String line;
-                                            int contentLength = -1;
-                                            StringBuffer sb = new StringBuffer();
-                                            int lines = 0;
-                                            while ((line = input.readLine()) != null && line.length() != 0) {
-                                                lines++;
-                                                sb.append(line);
-                                                if (line.startsWith("Content-Length:")) {
-                                                    String s = line.substring("Content-Length:".length()).trim();
-                                                    contentLength = Integer.valueOf(s);
-                                                }
-                                            }
-                                            if (lines == 0) break; // no valid message, we're done
-                                            if (contentLength == -1) {
-                                                throw new RuntimeException("Not a valid message: '" + sb.toString() + "'");
-                                            }
-                                            sb = new StringBuffer();
-                                            for (int x = 0; x < contentLength; ++x) {
-                                                sb.append((char) input.read());
-                                            }
-//                                            System.out.println("Received Content: '" + sb.toString() + "'");
-
-                                            output.write("HTTP/1.1 200 OK\r\n".getBytes("UTF-8"));
-                                            String contentLengthStr = "Content-Length: " + contentLength + "\r\n";
-                                            output.write(contentLengthStr.getBytes("UTF-8"));
-                                            output.write("\r\n".getBytes("UTF-8"));
-                                            output.write(sb.toString().getBytes());
-                                            output.flush();
-                                        }
-                                        output.close();
-                                        input.close();
-                                    }catch(SocketTimeoutException ex) {
-                                        System.out.println("closing socket " + remote + " after timeout!");
-                                    } catch (IOException e) {
-                                        e.printStackTrace();
-                                    } finally {
-                                        try {
-                                            remote.close();
-                                        } catch (IOException e) {}
-                                    }
+            ByteBuffer outputBuffer = ByteBuffer.allocate(1024);
+            Random rnd = new Random();
+            while (!_stopped.get()) {
+                try {
+                    int keycnt = selector.select(1000);
+                    if(keycnt == 0) continue;
+                    Set<SelectionKey> keys = selector.selectedKeys();
+                    for (Iterator<SelectionKey> it = keys.iterator(); it.hasNext(); ) {
+                        final SelectionKey k = it.next();
+                        if (k.isValid()) {
+                            if (k.isAcceptable()) {
+                                SocketChannel remote = sock.accept();
+                                remote.configureBlocking(false);
+                                remote.register(selector, SelectionKey.OP_READ);//
+                                _connectionsCreated++;
+                            } else if (k.isReadable()) {
+                                final SocketChannel chan = (SocketChannel) k.channel();
+                                if (k.attachment() == null) {
+                                    k.attach(ByteBuffer.allocate(1024));
                                 }
-                            });
-                        } catch(RejectedExecutionException rex){
-                            System.exit(-1);
-                            remote.close();
+                                final ByteBuffer inputBuffer = (ByteBuffer) k.attachment();
+                                try {
+                                    if(rnd.nextDouble() < _errorRate) {
+                                        chan.close();
+                                        k.cancel();
+                                        continue;
+                                    }
+                                    String result = "";
+
+                                    int messageBodyStart;
+                                    while ((messageBodyStart = result.indexOf("\r\n\r\n")) == -1)
+                                        result = readInput(chan, inputBuffer, 1000);
+                                    messageBodyStart += 4;
+                                    String kwrd = "Content-Length:";
+                                    int contentLengthStart = result.indexOf(kwrd) + kwrd.length();
+                                    int contentLengthEnd = result.indexOf("\r\n", contentLengthStart);
+                                    int contentLength = Integer.valueOf(
+                                            result.substring(contentLengthStart, contentLengthEnd).trim());
+
+                                    while( (messageBodyStart + contentLength) > result.length())
+                                        result = readInput(chan, inputBuffer, 1000);
+                                    String message = result.substring(messageBodyStart,
+                                            messageBodyStart + contentLength);
+                                    inputBuffer.flip();
+                                    inputBuffer.position(messageBodyStart + contentLength);
+                                    inputBuffer.compact();
+                                    StringBuffer response = new StringBuffer();
+                                    response.append("HTTP/1.1 200 OK\r\n");
+                                    response.append("Content-Length: " + contentLength + "\r\n\r\n");
+                                    response.append(message);
+                                    byte[] bytes = response.toString().getBytes("utf-8");
+                                    outputBuffer.put(bytes);
+                                    outputBuffer.flip();
+                                    chan.write(outputBuffer);
+                                    outputBuffer.clear();
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }
+                        } else {
+                            System.out.println("Invalid key");
                         }
-                    } catch (SocketTimeoutException ex){}
+                        it.remove();
+                    }
+                } catch (Exception e) {
+//                    e.printStackTrace();
                 }
-            } catch (IOException ex) {
-                throw new RuntimeException(ex);
             }
         }
-        public int port(){return _socket.getLocalPort();}
+
         public void stop() throws InterruptedException, IOException {
             if(!_stopped.getAndSet(true)){
                 _thread.join(1000);
-                _socket.close();
             }
         }
     }
 
+    private static class State {
+        final int numRequests;
 
-    private class State {
-        public final int numRequests;
-        final AtomicInteger requests = new AtomicInteger();
+        public State(int numRequests) {
+            this.numRequests = numRequests;
+        }
+
         final ConcurrentHashMap<String, AtomicInteger> errorCounts = new ConcurrentHashMap<>();
         final ConcurrentHashMap<String, Boolean> messages = new ConcurrentHashMap<>();
         final AtomicInteger succs = new AtomicInteger();
         final AtomicInteger fails = new AtomicInteger();
+        final AtomicInteger requests = new AtomicInteger();
+
         final Object _cond = new Object();
-        private boolean isDone;
-        public State(int numRequests) {this.numRequests = numRequests;}
-        private AtomicInteger completedRequests = new AtomicInteger();
-        public void requestSent(){
-            requests.incrementAndGet();
-        }
-        public void requestCompleted(String err){
-            if(err == null) {
-                succs.incrementAndGet();
-            } else {
-                fails.incrementAndGet();
-                errorCounts.putIfAbsent(err, new AtomicInteger());
-                errorCounts.get(err).incrementAndGet();
-            }
-            if(completedRequests.incrementAndGet() == numRequests) {
-                synchronized (_cond) {
-                    if(!isDone) {
-                        isDone = true;
-                        _cond.notifyAll();
-                    }
-                }
-            }
-        }
-        private void waitForCompletion(){
-            synchronized (_cond) {
-                while(!isDone) {
-                    try {
-                        System.out.println(this.toString());
-                        System.out.flush();
-                        _cond.wait(5*1000);
-                    } catch (InterruptedException e) {}
-                }
-            }
-        }
+        boolean isDone = false;
 
         public String toString(){
             StringBuilder sb = new StringBuilder();
@@ -235,118 +206,161 @@ public class DeadlockLoadTest extends AbstractConnectionTest
             return sb.toString();
         }
 
+        private void requestCompleted(){
+            if((succs.get() + fails.get()) == numRequests){
+                synchronized (_cond) {
+                    isDone = true;
+                    _cond.notifyAll();
+                }
+            }
+        }
+
         public void messageSent(String msg) {
+            requests.incrementAndGet();
             messages.putIfAbsent(msg, true);
         }
 
         public void messageReceived(String msg){
-            assert messages.remove(msg);
+            succs.incrementAndGet();
+            assert messages.remove(msg) != null;
+            requestCompleted();
+        }
+
+        public void messageFailed(String msg, String err) {
+            assert messages.remove(msg) != null;
+            fails.incrementAndGet();
+            errorCounts.putIfAbsent(err, new AtomicInteger(0));
+            errorCounts.get(err).incrementAndGet();
+            requestCompleted();
+        }
+
+        void waitForCompletion(){
+            synchronized (_cond) {
+                while(!isDone) {
+                    try {
+                        _cond.wait(10*1000);
+                    } catch (InterruptedException e) {}
+                }
+            }
         }
     }
+
+    private void send(HttpClient httpClient, int serverPort, final int numRequests) throws Exception {
+        final State st = new State(numRequests);
+        final Random rnd = new Random();
+        for (int i = 0; i < numRequests; i++) {
+            final StringBuffer messageBuf = new StringBuffer("Message(" + i + "): ");
+            int d;
+            while ((d = rnd.nextInt(100)) < 90) {
+                messageBuf.append(d);
+            }
+            final String message = messageBuf.toString();
+            HttpExchange exchange = new HttpExchange() {
+                String _content;
+                int contentLength = 0;
+
+                @Override
+                protected void onResponseHeader(Buffer name, Buffer value) {
+                    String nameStr = name.toString("utf-8");
+                    String valStr = value.toString("utf-8");
+                    if (nameStr.equals("Content-Length")) {
+                        contentLength = Integer.valueOf(valStr);
+                    }
+                }
+
+                @Override
+                protected void onResponseContent(Buffer content) {
+                    byte[] bits = new byte[contentLength];
+                    int read = content.get(bits, 0, contentLength);
+                    while (read < contentLength) {
+                        read += content.get(bits, read, contentLength - read);
+                    }
+                    String received = new String(bits);
+//                                System.out.println("received '" + received + "'");
+                    assertEquals(_content, received);
+                    st.messageReceived(new String(bits));
+                    st.requestCompleted();
+                }
+
+                @Override
+                protected void onResponseComplete() throws IOException {
+                }
+
+                @Override
+                protected void onExpire() {
+                    st.messageFailed(_content, "Expired!");
+                }
+
+                @Override
+                public void onException(Throwable ex) {
+                    st.messageFailed(_content, ex.toString());
+                }
+
+                @Override
+                public void onConnectionFailed(Throwable ex) {
+                    st.messageFailed(_content, ex.toString());
+                }
+
+                @Override
+                public void setRequestContent(Buffer requestContent) {
+                    _content = requestContent.toString("utf-8");
+                    super.setRequestContent(requestContent);
+                    assert _content != null;
+                }
+            };
+            byte[] messageBits = message.getBytes("utf-8");
+            if (messageBits.length > 512)
+                messageBits = Arrays.copyOf(messageBits, 512);
+            exchange.setRequestContent(new ByteArrayBuffer(messageBits));
+            exchange.setAddress(new Address("localhost", serverPort));
+            exchange.setMethod("POST");
+            exchange.setRequestURI("/some/path");
+            st.messageSent(message);
+            httpClient.send(exchange);
+//            Thread.sleep(1);
+        }
+        st.waitForCompletion();
+        System.out.println("");
+        System.out.println(st.toString());
+    }
+
+
 
     @Test
     public void testDeadlocks() throws Exception {
         System.out.println("Started");
-        // Differently from the SelectConnector, the SocketConnector cannot detect server closes.
-        // Therefore, upon a second send, the exchange will fail.
-        // Applications needs to retry it explicitly.
-        MyServer server = new MyServer();
-
+        EchoRESTServer server = new EchoRESTServer(0.95);
         final int serverPort = server.start();
-
         final HttpClient httpClient = this.newHttpClient();
-//        httpClient.setConnectBlocking(false);
         httpClient.setConnectorType(HttpClient.CONNECTOR_SELECT_CHANNEL);
         httpClient.setConnectTimeout(60000);
         httpClient.setIdleTimeout(120000);
-        httpClient.setMaxConnectionsPerAddress(64);
+//        httpClient.setThreadPool(new QueuedThreadPool(32));
+//        httpClient.setMaxConnectionsPerAddress(16);
+        System.out.println("MAX CON PER ADDR = " + httpClient.getMaxConnectionsPerAddress());
         httpClient.start();
-
-        ThreadPoolExecutor pool = new ThreadPoolExecutor(16, 16, 10,
-                TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(100000));
-
-
-        try
-        {
-            final State st = new State(1024);
-
-            for(int i = 0; i < st.numRequests; i ++) {
-                if(i != 0 && (i % 1000) == 0) {
-                    Thread.sleep(100);
-//                    System.out.println(st.toString());
-                }
-                final String message = "Message("  + i + ").";
-
-                pool.execute(new Runnable() {
+        try {
+            Thread [] threads = new Thread[10];
+            for(int i = 0; i < threads.length; ++i) {
+                threads[i] = new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        HttpExchange exchange = new HttpExchange() {
-                            String _content;
-                            int contentLength = 0;
-                            @Override protected void onResponseHeader(Buffer name, Buffer value){
-                                String nameStr = name.toString("utf-8");
-                                String valStr = value.toString("utf-8");
-                                if(nameStr.equals("Content-Length")) {
-                                    contentLength = Integer.valueOf(valStr);
-                                }
-                            }
-
-                            @Override protected void onResponseContent(Buffer content){
-                                byte [] bits = new byte[contentLength];
-                                int read = content.get(bits, 0, contentLength);
-                                while(read < contentLength) {
-                                    read += content.get(bits, read, contentLength - read);
-                                }
-                                String received = new String(bits);
-                                assertEquals(_content, received);
-                                st.messageReceived(new String(bits));
-
-                            }
-
-                            @Override
-                            protected void onResponseComplete() throws IOException {
-                                st.requestCompleted(null);
-                            }
-
-                            @Override
-                            protected void onExpire(){st.requestCompleted("Expired!");}
-
-
-                            @Override
-                            public void onException(Throwable ex) {
-//                                System.out.println("message sent failed for msg '" + _content + "'");
-                                st.requestCompleted(ex.toString());
-                                st.messageReceived(_content);
-                            }
-
-                            @Override
-                            public void onConnectionFailed(Throwable ex) {
-//                                System.out.println("message sent failed for msg '" + _content + "'");
-                                st.requestCompleted(ex.toString());
-                                st.messageReceived(_content);
-                            }
-
-                            @Override public void setRequestContent(Buffer requestContent) {
-                                _content = requestContent.toString("utf-8");
-                                super.setRequestContent(requestContent);
-                            }
-                        };
-                        exchange.setRequestContent(new ByteArrayBuffer(message));
-                        exchange.setAddress(new Address("localhost", serverPort));
-                        exchange.setMethod("POST");
-                        exchange.setRequestURI("/some/path");
                         try {
-                            httpClient.send(exchange);
-                        } catch (IOException e) {}
+                            send(httpClient, serverPort, 1 << 18);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }
                     }
                 });
-                st.requestSent();
-                st.messageSent(message);
             }
-            st.waitForCompletion();
-            System.out.println(st.toString());
+            for(Thread t: threads) {
+                t.start();
+                Thread.sleep(100);
+            }
+            for(Thread t: threads) t.join();
         } finally {
             server.stop();
+            System.out.println("CONNECTIONS CREATED = " + server._connectionsCreated);
             httpClient.stop();
         }
     }

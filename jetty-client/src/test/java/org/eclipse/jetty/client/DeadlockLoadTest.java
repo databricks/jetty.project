@@ -47,7 +47,6 @@ public class DeadlockLoadTest extends AbstractConnectionTest
     }
 
     private class EchoRESTServer {
-        ServerSocket _socket;
         Thread _thread;
         final AtomicBoolean _started = new AtomicBoolean();
         final AtomicBoolean _stopped = new AtomicBoolean();
@@ -60,7 +59,6 @@ public class DeadlockLoadTest extends AbstractConnectionTest
         public EchoRESTServer(double errorRate) {
             _errorRate = errorRate;
         }
-        public EchoRESTServer(){this(.1);}
 
         public int start() throws IOException {
             if(!_started.getAndSet(true)){
@@ -90,7 +88,7 @@ public class DeadlockLoadTest extends AbstractConnectionTest
                 if (chan.read(inputBuffer) > 0)
                     return new String(Arrays.copyOf(inputBuffer.array(), inputBuffer.position()));
             }
-            throw new RuntimeException("weird, no input");
+            throw new RuntimeException("no input");
         }
 
         private void _run() {
@@ -153,14 +151,10 @@ public class DeadlockLoadTest extends AbstractConnectionTest
                                     throw new RuntimeException(e);
                                 }
                             }
-                        } else {
-                            System.out.println("Invalid key");
                         }
                         it.remove();
                     }
-                } catch (Exception e) {
-//                    e.printStackTrace();
-                }
+                } catch (Exception e) {}
             }
         }
 
@@ -276,7 +270,6 @@ public class DeadlockLoadTest extends AbstractConnectionTest
                         read += content.get(bits, read, contentLength - read);
                     }
                     String received = new String(bits);
-//                                System.out.println("received '" + received + "'");
                     assertEquals(_content, received);
                     st.messageReceived(new String(bits));
                     st.requestCompleted();
@@ -317,10 +310,8 @@ public class DeadlockLoadTest extends AbstractConnectionTest
             exchange.setRequestURI("/some/path");
             st.messageSent(message);
             httpClient.send(exchange);
-//            Thread.sleep(1);
         }
         st.waitForCompletion();
-        System.out.println("");
         System.out.println(st.toString());
     }
 
@@ -328,16 +319,12 @@ public class DeadlockLoadTest extends AbstractConnectionTest
 
     @Test
     public void testDeadlocks() throws Exception {
-        System.out.println("Started");
-        EchoRESTServer server = new EchoRESTServer(0.95);
+        EchoRESTServer server = new EchoRESTServer(0.125);
         final int serverPort = server.start();
         final HttpClient httpClient = this.newHttpClient();
         httpClient.setConnectorType(HttpClient.CONNECTOR_SELECT_CHANNEL);
         httpClient.setConnectTimeout(60000);
         httpClient.setIdleTimeout(120000);
-//        httpClient.setThreadPool(new QueuedThreadPool(32));
-//        httpClient.setMaxConnectionsPerAddress(16);
-        System.out.println("MAX CON PER ADDR = " + httpClient.getMaxConnectionsPerAddress());
         httpClient.start();
         try {
             Thread [] threads = new Thread[10];
@@ -360,13 +347,8 @@ public class DeadlockLoadTest extends AbstractConnectionTest
             for(Thread t: threads) t.join();
         } finally {
             server.stop();
-            System.out.println("CONNECTIONS CREATED = " + server._connectionsCreated);
+            System.out.println("NUM CONNECTIONS CREATED = " + server._connectionsCreated);
             httpClient.stop();
         }
-    }
-
-    public void testIdleConnection() throws Exception
-    {
-        super.testIdleConnection();
     }
 }
